@@ -405,7 +405,11 @@ class Launcher:
             name = os.path.basename(p)
             counts[name] = counts.get(name, 0) + 1
 
+        current_value = self.file_var.get().strip()
+        current_path = self.selected_file_path
         self.audio_display_to_path.clear()
+        if current_value and current_path:
+            self.audio_display_to_path[current_value] = current_path
         items: list[str] = []
         for p in paths:
             name = os.path.basename(p)
@@ -493,8 +497,11 @@ class Launcher:
         value = self.file_var.get().strip()
         if value in self.audio_display_to_path:
             return self.audio_display_to_path[value]
-        if self.selected_file_path and value == os.path.basename(self.selected_file_path):
-            return self.selected_file_path
+        if self.selected_file_path:
+            name = os.path.basename(self.selected_file_path)
+            # 下拉框可能显示 "文件名  (父目录)" 或 "文件名 #2"，但真实路径保存在 selected_file_path
+            if value == name or value.startswith(f"{name}  (") or value.startswith(f"{name} #"):
+                return self.selected_file_path
         return value
 
     def _start(self):
