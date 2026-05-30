@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import tkinter as tk
@@ -15,6 +16,10 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from audio_engine import AudioEngine
 from hotkey import HOTKEY_NAME, start_hotkey
+from i18n import t
+
+AUDIO_EXTS = (".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif")
+SKIP_SCAN_DIRS = {".git", "__pycache__", ".venv", "venv", ".idea", ".vscode"}
 
 
 def launch(cfg: dict) -> bool:
@@ -33,6 +38,12 @@ def launch(cfg: dict) -> bool:
                          blocksize=512 if cfg["mode"] == "single" else 1024)
     engine.loop = cfg["loop"]
 
+    layout = _layout_windows(cfg)
+
+    # ---- 进度窗口 (所有播放模式都有) ----
+    from progress_window import ProgressWindow
+    progress_window = ProgressWindow(engine, cfg["file"], geometry=layout["progress_geometry"])
+
     # ---- 调试面板 (可选) — 仅单窗口模式有效 ----
     debug_panel = None
     params = None
@@ -45,9 +56,7 @@ def launch(cfg: dict) -> bool:
         })
         if cfg.get("debug"):
             from debug_panel import DebugPanel
-            # 把面板贴在主屏右侧, 留出窗口位置
-            geom = "320x540+{x}+80".format(x=max(0, _screen_w() - 360))
-            debug_panel = DebugPanel(params, geometry=geom)
+            debug_panel = DebugPanel(params, geometry=layout["debug_geometry"])
 
     try:
         if cfg["mode"] == "single":
@@ -57,7 +66,8 @@ def launch(cfg: dict) -> bool:
                               density=cfg["density"], color=cfg["color"],
                               show_fps=cfg["show_fps"], show_spec=cfg["show_spec"],
                               backend=cfg.get("backend", "auto"),
-                              params=params)
+                              params=params,
+                              window_pos=layout["render_pos"])
         else:
             from particle_windows import run_particles
             run_particles(engine, stop_event,
@@ -69,12 +79,14 @@ def launch(cfg: dict) -> bool:
         if debug_panel is not None:
             debug_panel.close()
             debug_panel.wait_closed(timeout=3.0)
+        progress_window.close()
+        progress_window.wait_closed(timeout=3.0)
 
     return quit_event.is_set()
 
 
 def _screen_w() -> int:
-    """取主屏宽度, 用于决定调试面板位置。失败就给个保守值。"""
+    """取主屏宽度。失败就给个保守值。"""
     try:
         import ctypes
         return int(ctypes.windll.user32.GetSystemMetrics(0))
@@ -82,12 +94,57 @@ def _screen_w() -> int:
         return 1920
 
 
+def _screen_h() -> int:
+    """取主屏高度。失败就给个保守值。"""
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetSystemMetrics(1))
+    except Exception:
+        return 1080
+
+
+def _layout_windows(cfg: dict) -> dict:
+    """根据播放模式/调试面板计算 pygame 窗口和进度窗口位置。"""
+    sw, sh = _screen_w(), _screen_h()
+    progress_h = 140
+    margin = 8
+    if cfg["mode"] == "single":
+        size = int(cfg["res"])
+        if cfg.get("debug"):
+            dbg_w, dbg_h = 320, 540
+            dbg_x, dbg_y = max(0, sw - 360), 80
+            render_x = max(20, (dbg_x - size) // 2)
+            render_y = max(40, min(80, sh - size - progress_h - 60))
+            prog_y = min(dbg_y + dbg_h + margin, max(0, sh - progress_h - 48))
+            return {
+                "render_pos": (render_x, render_y),
+                "debug_geometry": f"{dbg_w}x{dbg_h}+{dbg_x}+{dbg_y}",
+                "progress_geometry": f"{dbg_w}x{progress_h}+{dbg_x}+{prog_y}",
+            }
+        render_x = max(20, (sw - size) // 2)
+        render_y = max(40, (sh - size - progress_h - 80) // 2)
+        prog_y = min(render_y + size + margin, max(0, sh - progress_h - 48))
+        return {
+            "render_pos": (render_x, render_y),
+            "debug_geometry": None,
+            "progress_geometry": f"{size}x{progress_h}+{render_x}+{prog_y}",
+        }
+    prog_w = min(720, max(360, sw - 160))
+    prog_x = max(0, (sw - prog_w) // 2)
+    prog_y = max(0, sh - progress_h - 72)
+    return {
+        "render_pos": None,
+        "debug_geometry": None,
+        "progress_geometry": f"{prog_w}x{progress_h}+{prog_x}+{prog_y}",
+    }
+
+
 # ----------------------- 启动器界面 -----------------------
 class Launcher:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.cfg = None
-        root.title("示波器音乐播放器")
+        root.title(t("app_title"))
         root.configure(bg="#0b0f0b")
         root.resizable(False, False)
 
@@ -157,6 +214,19 @@ class Launcher:
                   darkcolor=[("disabled", ENTRY), ("!disabled", ENTRY)],
                   bordercolor=[("focus", ACCENT)])
 
+        # Combobox — 音乐文件可搜索下拉框
+        style.configure("TCombobox", fieldbackground=ENTRY, foreground=FG,
+                        arrowcolor=FG, bordercolor=BORDER, insertcolor=ACCENT,
+                        lightcolor=ENTRY, darkcolor=ENTRY)
+        style.map("TCombobox",
+                  foreground=[("disabled", FG_DIM)],
+                  fieldbackground=[("disabled", ENTRY),
+                                   ("!disabled", ENTRY)],
+                  lightcolor=[("disabled", ENTRY), ("!disabled", ENTRY)],
+                  darkcolor=[("disabled", ENTRY), ("!disabled", ENTRY)],
+                  arrowcolor=[("disabled", FG_DIM), ("active", ACCENT)],
+                  bordercolor=[("focus", ACCENT)])
+
         # Spinbox — 同理
         style.configure("TSpinbox", fieldbackground=ENTRY, foreground=FG,
                         arrowcolor=FG, bordercolor=BORDER, insertcolor=ACCENT,
@@ -176,14 +246,20 @@ class Launcher:
         frm = ttk.Frame(root, padding=16)
         frm.grid()
 
-        ttk.Label(frm, text="示波器音乐播放器", font=("Segoe UI", 16, "bold")
+        ttk.Label(frm, text=t("launcher_title"), font=("Segoe UI", 16, "bold")
                   ).grid(row=0, column=0, columnspan=3, pady=(0, 10))
 
-        # 文件
-        ttk.Label(frm, text="音乐文件:").grid(row=1, column=0, **pad)
+        # 文件: 可输入、可下拉、可模糊搜索
+        ttk.Label(frm, text=t("music_file")).grid(row=1, column=0, **pad)
         self.file_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.file_var, width=34).grid(row=1, column=1, **pad)
-        ttk.Button(frm, text="浏览…", command=self._pick).grid(row=1, column=2, **pad)
+        self.audio_paths: list[str] = []
+        self.audio_display_to_path: dict[str, str] = {}
+        self.selected_file_path = ""
+        self.file_combo = ttk.Combobox(frm, textvariable=self.file_var, width=34)
+        self.file_combo.grid(row=1, column=1, **pad)
+        self.file_combo.bind("<KeyRelease>", self._on_file_search)
+        self.file_combo.bind("<<ComboboxSelected>>", self._on_file_selected)
+        ttk.Button(frm, text=t("browse"), command=self._pick).grid(row=1, column=2, **pad)
 
         # 拖拽支持 (tkinterdnd2 可选; 没有则静默跳过)
         try:
@@ -193,19 +269,19 @@ class Launcher:
             pass
 
         # 模式
-        ttk.Label(frm, text="播放模式:").grid(row=2, column=0, **pad)
+        ttk.Label(frm, text=t("mode")).grid(row=2, column=0, **pad)
         self.mode_var = tk.StringVar(value="single")
-        ttk.Radiobutton(frm, text="单窗口 (流畅)", value="single",
+        ttk.Radiobutton(frm, text=t("mode_single"), value="single",
                         variable=self.mode_var, command=self._sync
                         ).grid(row=2, column=1, **pad)
-        ttk.Radiobutton(frm, text="粒子多窗口 (吃性能)", value="particles",
+        ttk.Radiobutton(frm, text=t("mode_particles"), value="particles",
                         variable=self.mode_var, command=self._sync
                         ).grid(row=2, column=2, **pad)
 
         # 单窗口: 分辨率
         self.res_var = tk.IntVar(value=900)
         self.res_row = ttk.Frame(frm)
-        ttk.Label(self.res_row, text="分辨率:").pack(side="left", padx=(0, 8))
+        ttk.Label(self.res_row, text=t("resolution")).pack(side="left", padx=(0, 8))
         for r in (600, 800, 900, 1200):
             ttk.Radiobutton(self.res_row, text=f"{r}px", value=r,
                             variable=self.res_var).pack(side="left", padx=4)
@@ -213,11 +289,11 @@ class Launcher:
 
         # 粒子: 数量 + 大小
         self.part_row = ttk.Frame(frm)
-        ttk.Label(self.part_row, text="窗口数量(分辨率):").pack(side="left")
+        ttk.Label(self.part_row, text=t("particle_count")).pack(side="left")
         self.count_var = tk.IntVar(value=120)
         ttk.Spinbox(self.part_row, from_=16, to=600, increment=8, width=6,
                     textvariable=self.count_var).pack(side="left", padx=8)
-        ttk.Label(self.part_row, text="粒子大小:").pack(side="left", padx=(12, 0))
+        ttk.Label(self.part_row, text=t("particle_size")).pack(side="left", padx=(12, 0))
         self.cell_var = tk.IntVar(value=8)
         ttk.Spinbox(self.part_row, from_=3, to=40, increment=1, width=5,
                     textvariable=self.cell_var).pack(side="left", padx=8)
@@ -225,7 +301,7 @@ class Launcher:
 
         # 单窗口抽稀
         self.dens_row = ttk.Frame(frm)
-        ttk.Label(self.dens_row, text="描线抽稀(性能):").pack(side="left")
+        ttk.Label(self.dens_row, text=t("density")).pack(side="left")
         self.dens_var = tk.IntVar(value=1)
         ttk.Spinbox(self.dens_row, from_=1, to=8, width=5,
                     textvariable=self.dens_var).pack(side="left", padx=8)
@@ -233,20 +309,20 @@ class Launcher:
 
         # 渲染后端 (单窗口才生效)
         self.backend_row = ttk.Frame(frm)
-        ttk.Label(self.backend_row, text="渲染后端:").pack(side="left", padx=(0, 8))
+        ttk.Label(self.backend_row, text=t("backend")).pack(side="left", padx=(0, 8))
         self.backend_var = tk.StringVar(value="auto")
-        ttk.Radiobutton(self.backend_row, text="自动", value="auto",
+        ttk.Radiobutton(self.backend_row, text=t("backend_auto"), value="auto",
                         variable=self.backend_var).pack(side="left", padx=4)
-        ttk.Radiobutton(self.backend_row, text="GPU (OpenGL)", value="gpu",
+        ttk.Radiobutton(self.backend_row, text=t("backend_gpu"), value="gpu",
                         variable=self.backend_var).pack(side="left", padx=4)
-        ttk.Radiobutton(self.backend_row, text="CPU (pygame)", value="cpu",
+        ttk.Radiobutton(self.backend_row, text=t("backend_cpu"), value="cpu",
                         variable=self.backend_var).pack(side="left", padx=4)
         self.backend_row.grid(row=6, column=0, columnspan=3, **pad)
 
         # 颜色选择
         self.color_var = tk.StringVar(value="#3CFF96")
         color_row = ttk.Frame(frm)
-        ttk.Label(color_row, text="磷光颜色:").pack(side="left", padx=(0, 8))
+        ttk.Label(color_row, text=t("phosphor_color")).pack(side="left", padx=(0, 8))
         self._color_btn = tk.Button(
             color_row, width=4, relief="flat", cursor="hand2",
             bg=self.color_var.get(), command=self._pick_color)
@@ -263,39 +339,107 @@ class Launcher:
         self.show_spec_var = tk.BooleanVar(value=True)
         self.debug_var     = tk.BooleanVar(value=False)
         chk_row = ttk.Frame(frm)
-        ttk.Checkbutton(chk_row, text="循环播放", variable=self.loop_var
+        ttk.Checkbutton(chk_row, text=t("loop"), variable=self.loop_var
                         ).pack(side="left", padx=(0,16))
-        ttk.Checkbutton(chk_row, text="显示帧率", variable=self.show_fps_var
+        ttk.Checkbutton(chk_row, text=t("show_fps"), variable=self.show_fps_var
                         ).pack(side="left", padx=(0,16))
-        ttk.Checkbutton(chk_row, text="显示频谱", variable=self.show_spec_var
+        ttk.Checkbutton(chk_row, text=t("show_spec"), variable=self.show_spec_var
                         ).pack(side="left", padx=(0,16))
-        self.debug_chk = ttk.Checkbutton(chk_row, text="调试模式 (右侧实时调参)",
+        self.debug_chk = ttk.Checkbutton(chk_row, text=t("debug_mode"),
                                          variable=self.debug_var)
         self.debug_chk.pack(side="left")
         chk_row.grid(row=8, column=0, columnspan=3, **pad)
 
-        ttk.Label(frm, text=f"安全停止热键: {HOTKEY_NAME}/ESC",
+        ttk.Label(frm, text=t("hotkey_hint", hotkey=HOTKEY_NAME),
                   foreground="#FFD479").grid(row=9, column=0, columnspan=3, pady=(4, 8))
 
-        ttk.Button(frm, text="▶  开始播放", command=self._start
+        ttk.Button(frm, text=t("start_play"), command=self._start
                    ).grid(row=10, column=0, columnspan=3, pady=8, ipadx=20, ipady=4)
 
+        self._scan_audio_dir(os.getcwd())
         self._sync()
+
+    def _scan_audio_dir(self, root_dir: str):
+        """递归扫描目录下的音频文件并刷新下拉列表。"""
+        if not root_dir or not os.path.isdir(root_dir):
+            return
+        paths: list[str] = []
+        for cur, dirs, files in os.walk(root_dir):
+            dirs[:] = [d for d in dirs if d not in SKIP_SCAN_DIRS]
+            for name in files:
+                if name.lower().endswith(AUDIO_EXTS):
+                    paths.append(os.path.abspath(os.path.join(cur, name)))
+        # 去重 + 稳定排序，避免重复扫描导致列表乱跳
+        self.audio_paths = sorted(dict.fromkeys(paths), key=lambda p: (os.path.basename(p).lower(), p.lower()))
+        self._update_file_values(self.file_var.get())
+
+    def _make_audio_display_items(self, paths: list[str]) -> list[str]:
+        counts: dict[str, int] = {}
+        for p in paths:
+            name = os.path.basename(p)
+            counts[name] = counts.get(name, 0) + 1
+
+        self.audio_display_to_path.clear()
+        items: list[str] = []
+        for p in paths:
+            name = os.path.basename(p)
+            if counts[name] > 1:
+                parent = os.path.basename(os.path.dirname(p))
+                label = f"{name}  ({parent})"
+            else:
+                label = name
+            # 极少数同名且父目录也同名的情况，追加序号保证 key 唯一
+            base_label = label
+            n = 2
+            while label in self.audio_display_to_path:
+                label = f"{base_label} #{n}"
+                n += 1
+            self.audio_display_to_path[label] = p
+            items.append(label)
+        return items
+
+    def _update_file_values(self, query: str = ""):
+        q = (query or "").strip().lower()
+        if q:
+            paths = [p for p in self.audio_paths
+                     if q in p.lower() or q in os.path.basename(p).lower()]
+        else:
+            paths = self.audio_paths
+        self.file_combo.configure(values=self._make_audio_display_items(paths[:300]))
+
+    def _on_file_search(self, event=None):
+        # 导航键/确认键不触发过滤，避免干扰 Combobox 自身选择行为
+        if event is not None and event.keysym in {"Up", "Down", "Return", "Escape", "Tab"}:
+            return
+        self._update_file_values(self.file_var.get())
+
+    def _on_file_selected(self, event=None):
+        value = self.file_var.get()
+        path = self.audio_display_to_path.get(value, value)
+        if path:
+            self.selected_file_path = path
+            self.file_var.set(value if value in self.audio_display_to_path else os.path.basename(path))
+            self._scan_audio_dir(os.path.dirname(path))
 
     def _pick(self):
         path = filedialog.askopenfilename(
-            title="选择音乐文件",
-            filetypes=[("音频", "*.wav *.flac *.ogg *.mp3 *.aiff"), ("所有文件", "*.*")])
+            title=t("select_music_title"),
+            filetypes=[(t("filetype_audio"), "*.wav *.flac *.ogg *.mp3 *.aiff *.aif"),
+                       (t("filetype_all"), "*.*")])
         if path:
-            self.file_var.set(path)
+            self.selected_file_path = path
+            self.file_var.set(os.path.basename(path))
+            self._scan_audio_dir(os.path.dirname(path))
 
     def _on_drop(self, event):
         path = event.data.strip().strip("{}")   # tkinterdnd2 在空格路径外套花括号
-        self.file_var.set(path)
+        self.selected_file_path = path
+        self.file_var.set(os.path.basename(path))
+        self._scan_audio_dir(os.path.dirname(path))
 
     def _pick_color(self):
         result = colorchooser.askcolor(color=self.color_var.get(),
-                                       title="选择磷光颜色")
+                                       title=t("select_color_title"))
         if result and result[1]:
             c = result[1]
             self.color_var.set(c)
@@ -319,12 +463,21 @@ class Launcher:
             if not isinstance(w, ttk.Label):
                 w.configure(state="disabled" if single else "normal")
 
+    def _resolve_file_path(self) -> str:
+        value = self.file_var.get().strip()
+        if value in self.audio_display_to_path:
+            return self.audio_display_to_path[value]
+        if self.selected_file_path and value == os.path.basename(self.selected_file_path):
+            return self.selected_file_path
+        return value
+
     def _start(self):
-        if not self.file_var.get():
-            messagebox.showwarning("提示", "请先选择一个音乐文件")
+        file_path = self._resolve_file_path()
+        if not file_path:
+            messagebox.showwarning(t("warning_title"), t("warning_no_file"))
             return
         self.cfg = {
-            "file": self.file_var.get(),
+            "file": file_path,
             "mode": "single" if self.mode_var.get() == "single" else "particles",
             "res": self.res_var.get(),
             "density": self.dens_var.get(),
@@ -353,7 +506,7 @@ def main():
             quit_program = False
             try:
                 r = tk.Tk(); r.withdraw()
-                messagebox.showerror("出错了", str(exc))
+                messagebox.showerror(t("error_title"), str(exc))
                 r.destroy()
             except Exception:
                 print("Error:", exc, file=sys.stderr)

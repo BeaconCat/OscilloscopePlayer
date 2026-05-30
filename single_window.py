@@ -13,11 +13,14 @@ decay_floor/blend_mode/show_spec/show_fps。不传则使用默认值, 行为与�
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 import numpy as np
 import pygame
+
+from i18n import t
 
 
 def _hex_to_rgb(h: str):
@@ -82,12 +85,14 @@ def _build_seven_seg_text(text: str, width: int, height: int,
 
 
 def _run_opengl(engine, stop_event, width, height, density, color,
-                params: dict | None):
+                params: dict | None, window_pos: tuple[int, int] | None = None):
     """OpenGL 渲染。失败抛异常, 由调用方决定回退。"""
     import moderngl
     ctx = None
+    if window_pos is not None:
+        os.environ["SDL_VIDEO_WINDOW_POS"] = f"{int(window_pos[0])},{int(window_pos[1])}"
     pygame.init()
-    pygame.display.set_caption("示波器音乐 · GPU(OpenGL)  (Ctrl+Alt+Q / ESC 返回)")
+    pygame.display.set_caption(t("gpu_caption"))
     pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
     ctx = moderngl.create_context()
     engine.start()
@@ -183,8 +188,8 @@ def _run_opengl(engine, stop_event, width, height, density, color,
 
     fbo_tex_a = ctx.texture((width, height), 4)
     fbo_tex_b = ctx.texture((width, height), 4)
-    for t in (fbo_tex_a, fbo_tex_b):
-        t.filter = moderngl.LINEAR, moderngl.LINEAR
+    for tex in (fbo_tex_a, fbo_tex_b):
+        tex.filter = moderngl.LINEAR, moderngl.LINEAR
     fbo_a = ctx.framebuffer(color_attachments=[fbo_tex_a])
     fbo_b = ctx.framebuffer(color_attachments=[fbo_tex_b])
     fbo_a.use(); ctx.clear(0, 0, 0, 0)
@@ -353,13 +358,15 @@ def _run_opengl(engine, stop_event, width, height, density, color,
 
 
 def _run_cpu(engine, stop_event, width, height, density, color,
-             params: dict | None):
+             params: dict | None, window_pos: tuple[int, int] | None = None):
     """pygame CPU fallback。同样支持 params 实时调参。"""
     cr, cg, cb = _hex_to_rgb(color)
     BEAM = np.array([cr, cg, cb], dtype=np.float32)
 
+    if window_pos is not None:
+        os.environ["SDL_VIDEO_WINDOW_POS"] = f"{int(window_pos[0])},{int(window_pos[1])}"
     pygame.init()
-    pygame.display.set_caption("示波器音乐 · CPU(pygame)  (Ctrl+Alt+Q / ESC 返回)")
+    pygame.display.set_caption(t("cpu_caption"))
     screen = pygame.display.set_mode((width, height))
     clock = pygame.time.Clock()
     engine.start()
@@ -477,7 +484,8 @@ def run_single_window(engine, stop_event: threading.Event,
                       density: int = 1, color: str = "#3CFF96",
                       show_fps: bool = True, show_spec: bool = True,
                       backend: str = "auto",
-                      params: dict | None = None):
+                      params: dict | None = None,
+                      window_pos: tuple[int, int] | None = None):
     """backend: 'auto' | 'gpu' | 'cpu'。
     params: 渲染线程每帧读取的参数 dict, 见 debug_panel.DEFAULTS。
     show_fps/show_spec 仅作为 params 缺失时的初值, 实际以 params 为准。
@@ -490,20 +498,20 @@ def run_single_window(engine, stop_event: threading.Event,
 
     backend = (backend or "auto").lower()
     if backend == "cpu":
-        _run_cpu(engine, stop_event, width, height, density, color, params)
+        _run_cpu(engine, stop_event, width, height, density, color, params, window_pos=window_pos)
         return
 
     # gpu 或 auto: 都先尝试 OpenGL
     try:
-        _run_opengl(engine, stop_event, width, height, density, color, params)
+        _run_opengl(engine, stop_event, width, height, density, color, params, window_pos=window_pos)
         return
     except Exception as exc:
         if backend == "gpu":
             # 用户明确指定 GPU, 不静默回退, 让外层弹错
-            raise RuntimeError(f"GPU(OpenGL) 渲染初始化失败: {exc}") from exc
+            raise RuntimeError(t("gpu_init_failed", error=exc)) from exc
         # auto: 静默回退到 CPU
         try:
             pygame.quit()
         except Exception:
             pass
-        _run_cpu(engine, stop_event, width, height, density, color, params)
+        _run_cpu(engine, stop_event, width, height, density, color, params, window_pos=window_pos)

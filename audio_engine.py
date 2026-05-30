@@ -58,6 +58,7 @@ class AudioEngine:
         self.scope_size = scope_size
         self.blocksize = blocksize
         self.loop = True
+        self.paused = False
 
         self._pos = 0
         self._lock = threading.Lock()
@@ -67,6 +68,10 @@ class AudioEngine:
 
     # ---- 音频回调 (实时线程, 必须轻量) ----
     def _callback(self, outdata, frames, time_info, status):
+        if self.paused:
+            outdata.fill(0)
+            return
+
         start = self._pos
         end = start + frames
         if end <= self.frames:
@@ -114,6 +119,33 @@ class AudioEngine:
         with self._lock:
             np.copyto(out, self._scope)
         return out
+
+    def get_time_info(self) -> tuple[float, float, float]:
+        """返回 (当前秒数, 总秒数, 进度 0..1)。
+
+        _pos 由音频回调线程更新；这里只读一个 Python int，开销很低。
+        loop=True 时播放回到开头后 _pos 也会回到开头，因此进度条会跟着回绕。
+        """
+        duration = self.frames / self.samplerate if self.samplerate else 0.0
+        pos = min(max(int(self._pos), 0), self.frames)
+        current = pos / self.samplerate if self.samplerate else 0.0
+        ratio = (current / duration) if duration > 0 else 0.0
+        return current, duration, max(0.0, min(1.0, ratio))
+
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
+    def toggle_pause(self) -> bool:
+        self.paused = not self.paused
+        return self.paused
+
+    def seek_ratio(self, ratio: float):
+        ratio = max(0.0, min(1.0, float(ratio)))
+        self._pos = int(ratio * max(0, self.frames - 1))
+        self.finished.clear()
 
     def stop(self):
         if self._stream is not None:

@@ -16,6 +16,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
+from i18n import t
+
 
 # 渲染线程读这些 key 即可
 DEFAULTS: dict = {
@@ -143,7 +145,7 @@ class DebugPanel:
     def _run(self):
         root = tk.Tk()
         self._root = root
-        root.title("调试面板 · 实时调节")
+        root.title(t("debug_panel_title"))
         root.attributes("-topmost", True)
         root.resizable(False, False)
         if self.geometry:
@@ -156,53 +158,53 @@ class DebugPanel:
         outer = ttk.Frame(root, padding=12)
         outer.pack(fill="both", expand=True)
 
-        ttk.Label(outer, text="实时渲染参数", style="Header.TLabel"
+        ttk.Label(outer, text=t("debug_header"), style="Header.TLabel"
                   ).pack(anchor="w", pady=(0, 4))
 
         # 保存滑块引用, 供重置时刷新
         sliders = {}  # key -> (DoubleVar, Label, fmt_str)
-        sliders["decay"] = self._slider(outer, "余辉衰减 decay", "decay", 0.50, 0.995,
+        sliders["decay"] = self._slider(outer, t("debug_decay"), "decay", 0.50, 0.995,
                      fmt="{:.3f}",
-                     hint="越大拖尾越久; 太大快闪曲线会糊屏")
-        sliders["decay_floor"] = self._slider(outer, "余辉硬地板 floor", "decay_floor", 0.0, 0.05,
+                     hint=t("debug_decay_hint"))
+        sliders["decay_floor"] = self._slider(outer, t("debug_decay_floor"), "decay_floor", 0.0, 0.05,
                      fmt="{:.4f}",
-                     hint="把残余的微弱辉光直接截零, 防累积糊屏")
-        sliders["ref"] = self._slider(outer, "速度→亮度参考 ref", "ref", 0.003, 0.05,
+                     hint=t("debug_decay_floor_hint"))
+        sliders["ref"] = self._slider(outer, t("debug_ref"), "ref", 0.003, 0.05,
                      fmt="{:.4f}",
-                     hint="越大整体越亮 (慢速段也会亮)")
-        sliders["min_bright"] = self._slider(outer, "最低亮度 min", "min_bright", 0.02, 0.60,
+                     hint=t("debug_ref_hint"))
+        sliders["min_bright"] = self._slider(outer, t("debug_min_bright"), "min_bright", 0.02, 0.60,
                      fmt="{:.2f}",
-                     hint="高速段不至于完全黑掉的下限")
-        sliders["beam_gain"] = self._slider(outer, "光束亮度倍率 gain", "beam_gain", 0.2, 3.0,
+                     hint=t("debug_min_bright_hint"))
+        sliders["beam_gain"] = self._slider(outer, t("debug_beam_gain"), "beam_gain", 0.2, 3.0,
                      fmt="{:.2f}",
-                     hint="总开关; 觉得整张图太亮就调小")
+                     hint=t("debug_beam_gain_hint"))
 
         # 叠加方式
         sec = ttk.Frame(outer); sec.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Label(sec, text="光束叠加方式", style="Header.TLabel"
+        ttk.Label(sec, text=t("debug_blend_mode"), style="Header.TLabel"
                   ).pack(anchor="w")
         blend_var = tk.StringVar(value=self.params.get("blend_mode", "add"))
         def _set_blend(*_):
             self.params["blend_mode"] = blend_var.get()
-        ttk.Radiobutton(sec, text="累加 add (经典辉光, 易过曝)",
+        ttk.Radiobutton(sec, text=t("debug_blend_add"),
                         value="add",  variable=blend_var,
                         command=_set_blend).pack(anchor="w")
-        ttk.Radiobutton(sec, text="取最大值 max (永不饱和, 治糊屏)",
+        ttk.Radiobutton(sec, text=t("debug_blend_max"),
                         value="max",  variable=blend_var,
                         command=_set_blend).pack(anchor="w")
 
         # 显示开关
         sw = ttk.Frame(outer); sw.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Label(sw, text="显示开关", style="Header.TLabel"
+        ttk.Label(sw, text=t("debug_display_switches"), style="Header.TLabel"
                   ).pack(anchor="w")
         spec_var = tk.BooleanVar(value=bool(self.params.get("show_spec", True)))
         fps_var  = tk.BooleanVar(value=bool(self.params.get("show_fps",  True)))
         def _sync_sw(*_):
             self.params["show_spec"] = bool(spec_var.get())
             self.params["show_fps"]  = bool(fps_var.get())
-        ttk.Checkbutton(sw, text="显示频谱", variable=spec_var,
+        ttk.Checkbutton(sw, text=t("show_spec"), variable=spec_var,
                         command=_sync_sw).pack(anchor="w")
-        ttk.Checkbutton(sw, text="显示帧率", variable=fps_var,
+        ttk.Checkbutton(sw, text=t("show_fps"), variable=fps_var,
                         command=_sync_sw).pack(anchor="w")
 
         # 重置按钮
@@ -219,7 +221,7 @@ class DebugPanel:
             blend_var.set(DEFAULTS["blend_mode"])
             spec_var.set(DEFAULTS["show_spec"])
             fps_var.set(DEFAULTS["show_fps"])
-        ttk.Button(btns, text="重置为默认值", command=_reset
+        ttk.Button(btns, text=t("debug_reset"), command=_reset
                    ).pack(side="left")
 
         def _on_close():
