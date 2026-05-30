@@ -14,6 +14,7 @@ decay_floor/blend_mode/show_spec/show_fps。不传则使用默认值, 行为与�
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
 import pygame
@@ -29,6 +30,55 @@ def _get(params: dict | None, key: str, default):
         return default
     v = params.get(key, default)
     return v if v is not None else default
+
+
+_SEGMENTS = {
+    "0": "abcedf", "1": "bc",      "2": "abged", "3": "abgcd", "4": "fgbc",
+    "5": "afgcd",  "6": "afgecd", "7": "abc",   "8": "abcdefg", "9": "abfgcd",
+    "F": "afge",   "P": "abfge",  "S": "afgcd", " ": "",
+}
+
+
+def _build_seven_seg_text(text: str, width: int, height: int,
+                          px: int = 8, py: int = 8) -> np.ndarray:
+    """生成右上角七段数码管文字的 OpenGL 顶点。
+
+    顶点格式: pos.xy + alpha。完全用几何图形绘制 FPS, 避免 pygame 字体渲染、
+    整屏 Surface 和每帧纹理上传。
+    """
+    cw, ch, th, gap = 10, 16, 2, 4
+    total_w = len(text) * cw + max(0, len(text) - 1) * gap
+    x0 = width - px - total_w
+    y0 = py
+    verts: list[float] = []
+
+    def rect(x: float, y: float, w: float, h: float, a: float = 0.72):
+        nx0 = -1.0 + (x / width) * 2.0
+        nx1 = -1.0 + ((x + w) / width) * 2.0
+        ny0 = 1.0 - (y / height) * 2.0
+        ny1 = 1.0 - ((y + h) / height) * 2.0
+        verts.extend([nx0, ny0, a, nx1, ny0, a, nx0, ny1, a,
+                      nx1, ny0, a, nx1, ny1, a, nx0, ny1, a])
+
+    # segment rects in local pixel coordinates: a top, b upper-right, c lower-right,
+    # d bottom, e lower-left, f upper-left, g middle
+    seg_rects = {
+        "a": (2, 0, cw - 4, th),
+        "b": (cw - th, 2, th, ch // 2 - 3),
+        "c": (cw - th, ch // 2 + 1, th, ch // 2 - 3),
+        "d": (2, ch - th, cw - 4, th),
+        "e": (0, ch // 2 + 1, th, ch // 2 - 3),
+        "f": (0, 2, th, ch // 2 - 3),
+        "g": (2, ch // 2 - th // 2, cw - 4, th),
+    }
+    for i, ch_ in enumerate(text):
+        ox = x0 + i * (cw + gap)
+        for seg in _SEGMENTS.get(ch_, ""):
+            sx, sy, sw, sh = seg_rects[seg]
+            rect(ox + sx, y0 + sy, sw, sh)
+    if not verts:
+        return np.empty((0, 3), dtype=np.float32)
+    return np.asarray(verts, dtype=np.float32).reshape(-1, 3)
 
 
 def _run_opengl(engine, stop_event, width, height, density, color,
@@ -91,6 +141,10 @@ def _run_opengl(engine, stop_event, width, height, density, color,
     prog_spec = ctx.program(vertex_shader=vert_spec, fragment_shader=frag_spec)
     prog_spec["specColor"].value = (cr * 0.45, cg * 0.75, cb * 0.45)
 
+    # --- UI/FPS 着色器: 纯几何七段数码管, 不再走 pygame 字体→纹理上传 ---
+    prog_ui = ctx.program(vertex_shader=vert_spec, fragment_shader=frag_spec)
+    prog_ui["specColor"].value = (cr, cg, cb)
+
     # --- 全屏四边形: 余辉衰减 / 最终合成 ---
     # decay 为衰减系数; floor 为硬地板, 把残余微弱亮度截零, 防累积糊屏
     vert_quad = """
@@ -139,7 +193,7 @@ def _run_opengl(engine, stop_event, width, height, density, color,
     tex_write, tex_read = fbo_tex_a, fbo_tex_b
 
     scope_size = engine.scope_size
-    n_pts = scope_size if density <= 1 else scope_size // density
+    n_pts = scope_size if density <= 1 else (scope_size + density - 1) // density
     beam_vbo = ctx.buffer(reserve=n_pts * 3 * 4)
     beam_vao = ctx.vertex_array(prog_beam, [(beam_vbo, "2f 1f", "pos", "bright")])
 
@@ -147,7 +201,29 @@ def _run_opengl(engine, stop_event, width, height, density, color,
     spec_vbo = ctx.buffer(reserve=N_BARS * 6 * 3 * 4)
     spec_vao = ctx.vertex_array(prog_spec, [(spec_vbo, "2f 1f", "pos", "alpha")])
 
-    fps_font = pygame.font.SysFont("Consolas", 15)
+    # FPS UI: 最多显示 "9999 FPS"，每字符最多 7 段，每段 6 顶点，每顶点 3 float
+    ui_vbo = ctx.buffer(reserve=8 * 7 * 6 * 3 * 4)
+    ui_vao = ctx.vertex_array(prog_ui, [(ui_vbo, "2f 1f", "pos", "alpha")])
+    ui_vertices = 0
+    last_fps_text = ""
+    last_fps_update = 0.0
+
+    # 预分配每帧复用的 numpy 缓冲，避免 render loop 分配垃圾对象
+    scope_full = np.empty((scope_size, 2), dtype=np.float32)
+    beam_data = np.empty((n_pts, 3), dtype=np.float32)
+    seg = np.empty((n_pts - 1, 2), dtype=np.float32)
+    lengths = np.empty(n_pts - 1, dtype=np.float32)
+    seg_bright = np.empty(n_pts - 1, dtype=np.float32)
+    v_bright = np.empty(n_pts, dtype=np.float32)
+    spec_data = np.empty((N_BARS * 6, 3), dtype=np.float32)
+    spec_x0 = (-1.0 + np.arange(N_BARS, dtype=np.float32) * (2.0 / N_BARS))
+    spec_x1 = spec_x0 + (2.0 / N_BARS) * 0.82
+
+    u_quad_decay = prog_quad["decay"]
+    u_quad_floor = prog_quad["floor_"]
+    u_beam_gain = prog_beam["gain"]
+
+    ctx.enable(moderngl.BLEND)
 
     clock = pygame.time.Clock()
     running = True
@@ -169,34 +245,34 @@ def _run_opengl(engine, stop_event, width, height, density, color,
             show_spec  = bool (_get(params, "show_spec",   True))
             show_fps   = bool (_get(params, "show_fps",    True))
 
-            raw = engine.get_scope()
-            if density > 1:
-                raw = raw[::density]
-            pts = raw.astype(np.float32)
+            engine.get_scope_into(scope_full)
+            pts = scope_full if density <= 1 else scope_full[::density]
+            n = len(pts)
 
-            seg = pts[1:] - pts[:-1]
-            lengths = np.hypot(seg[:, 0], seg[:, 1])
-            seg_bright = np.clip(ref / (lengths + ref), min_bright, 1.0).astype(np.float32)
-            v_bright = np.empty(len(pts), dtype=np.float32)
-            v_bright[0]    = seg_bright[0]
-            v_bright[-1]   = seg_bright[-1]
-            v_bright[1:-1] = (seg_bright[:-1] + seg_bright[1:]) * 0.5
-            beam_data = np.column_stack([pts, v_bright]).astype(np.float32)
+            # 速度→亮度: 全部原地计算，避免 np.column_stack / astype / 临时数组
+            np.subtract(pts[1:], pts[:-1], out=seg[:n-1])
+            np.hypot(seg[:n-1, 0], seg[:n-1, 1], out=lengths[:n-1])
+            np.divide(ref, lengths[:n-1] + ref, out=seg_bright[:n-1])
+            np.clip(seg_bright[:n-1], min_bright, 1.0, out=seg_bright[:n-1])
+            v_bright[0] = seg_bright[0]
+            v_bright[n-1] = seg_bright[n-2]
+            v_bright[1:n-1] = (seg_bright[:n-2] + seg_bright[1:n-1]) * 0.5
+            beam_data[:n, :2] = pts
+            beam_data[:n, 2] = v_bright[:n]
 
-            ctx.enable(moderngl.BLEND)
             ctx.blend_equation = moderngl.FUNC_ADD
 
             # ---- 余辉衰减: 读 tex_read → 乘 decay → 覆盖写 fbo_write ----
             fbo_write.use()
             ctx.clear(0.0, 0.0, 0.0, 0.0)
             ctx.blend_func = moderngl.ONE, moderngl.ZERO
-            prog_quad["decay"]  = decay
-            prog_quad["floor_"] = decay_floor
+            u_quad_decay.value = decay
+            u_quad_floor.value = decay_floor
             tex_read.use(0)
             quad_vao.render(moderngl.TRIANGLES)
 
             # ---- 光束叠加 ----
-            prog_beam["gain"].value = gain
+            u_beam_gain.value = gain
             if blend_mode == "max":
                 # 取最大值, 永不饱和 — 治糊屏
                 ctx.blend_equation = moderngl.MAX
@@ -205,8 +281,8 @@ def _run_opengl(engine, stop_event, width, height, density, color,
                 # 经典加色叠加, 辉光感更强但易过曝
                 ctx.blend_equation = moderngl.FUNC_ADD
                 ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE
-            beam_vbo.write(beam_data.tobytes())
-            beam_vao.render(moderngl.LINE_STRIP, vertices=len(pts))
+            beam_vbo.write(beam_data[:n])
+            beam_vao.render(moderngl.LINE_STRIP, vertices=n)
             # 恢复加法叠加, 后续合成需要它
             ctx.blend_equation = moderngl.FUNC_ADD
 
@@ -217,53 +293,53 @@ def _run_opengl(engine, stop_event, width, height, density, color,
             ctx.screen.use()
             ctx.clear(0.0, 0.0, 0.0, 1.0)
             ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
-            prog_quad["decay"]  = 1.0
-            prog_quad["floor_"] = 0.0
+            u_quad_decay.value = 1.0
+            u_quad_floor.value = 0.0
             tex_read.use(0)
             quad_vao.render(moderngl.TRIANGLES)
 
             # ---- 频谱 ----
             if show_spec:
-                mono = raw[:, 0] * 0.5 + raw[:, 1] * 0.5
-                fft_mag = np.abs(np.fft.rfft(mono.astype(np.float32), n=512))[:N_BARS]
+                mono = (pts[:, 0] + pts[:, 1]) * 0.5
+                fft_mag = np.abs(np.fft.rfft(mono, n=512))[:N_BARS].astype(np.float32, copy=False)
                 mx = fft_mag.max()
                 if mx > 1e-6:
-                    fft_mag = fft_mag / mx
-                bar_w = 2.0 / N_BARS
-                spec_h_ndc = 0.36
-                y_base = -1.0
-                verts = []
-                for i, mag in enumerate(fft_mag):
-                    x0 = -1.0 + i * bar_w
-                    x1 = x0 + bar_w * 0.82
-                    y0 = y_base
-                    y1 = y_base + mag * spec_h_ndc
-                    a_bot = float(0.08 + mag * 0.45)
-                    a_top = float(0.02 + mag * 0.18)
-                    verts += [x0,y0,a_bot, x1,y0,a_bot, x0,y1,a_top,
-                               x1,y0,a_bot, x1,y1,a_top, x0,y1,a_top]
+                    fft_mag /= mx
+                y0 = -1.0
+                y1 = y0 + fft_mag * 0.36
+                a_bot = 0.08 + fft_mag * 0.45
+                a_top = 0.02 + fft_mag * 0.18
+                v = spec_data.reshape(N_BARS, 6, 3)
+                v[:, 0, 0] = spec_x0; v[:, 0, 1] = y0; v[:, 0, 2] = a_bot
+                v[:, 1, 0] = spec_x1; v[:, 1, 1] = y0; v[:, 1, 2] = a_bot
+                v[:, 2, 0] = spec_x0; v[:, 2, 1] = y1; v[:, 2, 2] = a_top
+                v[:, 3, 0] = spec_x1; v[:, 3, 1] = y0; v[:, 3, 2] = a_bot
+                v[:, 4, 0] = spec_x1; v[:, 4, 1] = y1; v[:, 4, 2] = a_top
+                v[:, 5, 0] = spec_x0; v[:, 5, 1] = y1; v[:, 5, 2] = a_top
                 ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE
-                spec_vbo.write(np.array(verts, dtype=np.float32).tobytes())
+                spec_vbo.write(spec_data)
                 spec_vao.render(moderngl.TRIANGLES, vertices=N_BARS * 6)
 
-            # ---- FPS ----
+            # ---- FPS: 纯 OpenGL 七段几何文字 ----
             if show_fps:
-                fps_val = clock.get_fps()
-                fps_surf = fps_font.render(f"{fps_val:.0f} FPS", True,
-                                           tuple(int(c * 255) for c in (cr, cg, cb)))
-                fps_surf.set_alpha(160)
-                overlay = pygame.Surface((width, height), pygame.SRCALPHA)
-                overlay.fill((0, 0, 0, 0))
-                overlay.blit(fps_surf, (width - fps_surf.get_width() - 8, 8))
-                raw_str = pygame.image.tostring(overlay, "RGBA", True)
-                fps_tex = ctx.texture((width, height), 4, data=raw_str)
-                fps_tex.filter = moderngl.NEAREST, moderngl.NEAREST
-                ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-                fps_tex.use(0)
-                prog_quad["decay"]  = 1.0
-                prog_quad["floor_"] = 0.0
-                quad_vao.render(moderngl.TRIANGLES)
-                fps_tex.release()
+                now = time.perf_counter()
+                if now - last_fps_update >= 0.25:
+                    fps_int = min(9999, max(0, int(round(clock.get_fps()))))
+                    txt = f"{fps_int} FPS"
+                    if txt != last_fps_text:
+                        fps_data = _build_seven_seg_text(txt, width, height)
+                        ui_vertices = len(fps_data)
+                        if ui_vertices:
+                            ui_vbo.write(fps_data)
+                        last_fps_text = txt
+                    last_fps_update = now
+                if ui_vertices:
+                    ctx.blend_equation = moderngl.FUNC_ADD
+                    ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+                    ui_vao.render(moderngl.TRIANGLES, vertices=ui_vertices)
+            else:
+                last_fps_text = ""
+                ui_vertices = 0
 
             pygame.display.flip()
             clock.tick()
@@ -302,6 +378,7 @@ def _run_cpu(engine, stop_event, width, height, density, color,
     N_BARS = 48
     spec_h = int(height * 0.18)
     spec_surf = pygame.Surface((width, spec_h), pygame.SRCALPHA).convert_alpha()
+    scope_full = np.empty((engine.scope_size, 2), dtype=np.float32)
 
     running = True
     while running and not stop_event.is_set():
@@ -329,9 +406,8 @@ def _run_cpu(engine, stop_event, width, height, density, color,
         FADE_VAL = (sub + sub_floor, sub + sub_floor + 1, sub + sub_floor)
         fade.fill(FADE_VAL)
 
-        scope = engine.get_scope()
-        if density > 1:
-            scope = scope[::density]
+        engine.get_scope_into(scope_full)
+        scope = scope_full if density <= 1 else scope_full[::density]
 
         xs = cx + scope[:, 0] * scope_scale
         ys = cy - scope[:, 1] * scope_scale

@@ -109,6 +109,12 @@ class AudioEngine:
         with self._lock:
             return self._scope.copy()
 
+    def get_scope_into(self, out: np.ndarray) -> np.ndarray:
+        """把最新一窗口样本复制到调用方提供的缓冲区, 避免渲染循环每帧分配新数组。"""
+        with self._lock:
+            np.copyto(out, self._scope)
+        return out
+
     def stop(self):
         if self._stream is not None:
             try:
