@@ -255,6 +255,7 @@ class Launcher:
         self.audio_paths: list[str] = []
         self.audio_display_to_path: dict[str, str] = {}
         self.selected_file_path = ""
+        self._scan_generation = 0
         self.file_combo = ttk.Combobox(frm, textvariable=self.file_var, width=34)
         self.file_combo.grid(row=1, column=1, **pad)
         self.file_combo.bind("<KeyRelease>", self._on_file_search)
@@ -360,18 +361,43 @@ class Launcher:
         self._sync()
 
     def _scan_audio_dir(self, root_dir: str):
-        """递归扫描目录下的音频文件并刷新下拉列表。"""
+        """后台递归扫描目录下的音频文件并刷新下拉列表，避免阻塞 Tk 主线程。"""
         if not root_dir or not os.path.isdir(root_dir):
             return
-        paths: list[str] = []
-        for cur, dirs, files in os.walk(root_dir):
-            dirs[:] = [d for d in dirs if d not in SKIP_SCAN_DIRS]
-            for name in files:
-                if name.lower().endswith(AUDIO_EXTS):
-                    paths.append(os.path.abspath(os.path.join(cur, name)))
-        # 去重 + 稳定排序，避免重复扫描导致列表乱跳
-        self.audio_paths = sorted(dict.fromkeys(paths), key=lambda p: (os.path.basename(p).lower(), p.lower()))
-        self._update_file_values(self.file_var.get())
+        self._scan_generation += 1
+        generation = self._scan_generation
+        root_dir = os.path.abspath(root_dir)
+
+        def _worker():
+            paths: list[str] = []
+            max_files = 2000
+            try:
+                for cur, dirs, files in os.walk(root_dir):
+                    dirs[:] = [d for d in dirs if d not in SKIP_SCAN_DIRS]
+                    for name in files:
+                        if name.lower().endswith(AUDIO_EXTS):
+                            paths.append(os.path.abspath(os.path.join(cur, name)))
+                            if len(paths) >= max_files:
+                                raise StopIteration
+            except StopIteration:
+                pass
+            except Exception:
+                return
+            paths = sorted(dict.fromkeys(paths), key=lambda p: (os.path.basename(p).lower(), p.lower()))
+
+            def _apply():
+                # 如果用户又触发了新扫描，旧结果丢弃
+                if generation != self._scan_generation:
+                    return
+                self.audio_paths = paths
+                self._update_file_values(self.file_var.get())
+
+            try:
+                self.root.after(0, _apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _make_audio_display_items(self, paths: list[str]) -> list[str]:
         counts: dict[str, int] = {}
